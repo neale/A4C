@@ -89,15 +89,15 @@ ENV/
 .ropeproject
 
 # tf stuff
-.index
+*.index
 checkpoint
-.ckpt*
+*.ckpt
 *.cpkt.*
-.data*
-.meta*
+*.data*
+*.meta*
 
 # data prep
-.bin
+*.bin
 bazel*
 WORKSPACE
 BUILD
