@@ -89,10 +89,9 @@ ENV/
 .ropeproject
 
 # tf stuff
-.index
+*.index
 checkpoint
-.ckpt*
-*.cpkt.*
+*.ckpt.*
 *.data*
 *.meta*
 
