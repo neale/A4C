@@ -93,8 +93,8 @@ ENV/
 checkpoint
 .ckpt*
 *.cpkt.*
-.data*
-.meta*
+*.data*
+*.meta*
 
 # data prep
 .bin
