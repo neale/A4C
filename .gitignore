@@ -91,7 +91,7 @@ ENV/
 # tf stuff
 *.index
 checkpoint
-*.ckpt.*
+*.ckpt*
 *.data*
 *.meta*
 
