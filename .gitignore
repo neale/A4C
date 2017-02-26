@@ -96,7 +96,7 @@ checkpoint
 *.meta*
 
 # data prep
-.bin
+*.bin
 bazel*
 WORKSPACE
 BUILD
