@@ -10,6 +10,7 @@ import argparse
 from skimage.transform import resize
 from skimage.color import rgb2gray
 from collections import deque
+import matplotlib.pyplot as plt
 
 import gym
 import tensorflow as tf
@@ -23,7 +24,7 @@ scalar_summary = tf.summary.scalar
 
 game = 'MsPacman-v0'
 # Learning threads
-n_threads = 2
+n_threads = 4
 
 # =============================
 #   Training Parameters
@@ -43,7 +44,12 @@ learning_rate = 0.001
 # Reward discount rate
 gamma = 0.99
 # Number of timesteps to anneal epsilon
-anneal_epsilon_timesteps = 400000
+anneal_epsilon_timesteps = 2000000
+# Size of the epoch (used for reward measurement over time)
+epoch_size = 2000000
+epoch = 0
+epoch_high_score = 0
+high_score = []
 
 # =============================
 #   Utils Parameters
@@ -54,10 +60,9 @@ show_training = True
 summary_dir = '/tmp/tflearn_logs/'
 summary_interval = 100
 checkpoint_path = 'qlearning.tflearn.ckpt'
-checkpoint_interval = 2000
+checkpoint_interval = 10000
 # Number of episodes to run gym evaluation
 num_eval_episodes = 100
-
 
 # =============================
 #   TFLearn Deep Q Network
@@ -77,7 +82,7 @@ def collect_args():
                         default='train')
     parser.add_argument('--save_path', '-c', help="path to save model checkpoints at",
                         default='./model')
-    parser.add_argument('--load_params', '-l', help="path to load model checkpoints from",
+    parser.add_argument('--meta', '-g', help="path to meta graph file",
                         default='./model')
 
     args = parser.parse_args()
@@ -96,8 +101,9 @@ def build_dqn(num_actions, action_repeat):
     #fc1_game   = tflearn.fully_connected(conv2, 512, activation='relu')
     #q_values   = tflearn.fully_connected(fc1_game, num_actions)
 
-    fc1_hidden = tflearn.fully_connected(conv2, 4096, activation='relu')
-    lstm_1     = tflearn.lstm(fc1, 128, dropout=0.5)
+    fc1_hidden = tflearn.fully_connected(conv2, 512, activation='relu')
+    lstm_in    = tf.reshape(fc1_hidden, [-1, 1, 512])
+    lstm_1     = tflearn.lstm(lstm_in, 512, dropout=0.5)
     q_values   = tflearn.fully_connected(lstm_1, num_actions, activation='softmax')
     return inputs, q_values
 
@@ -202,7 +208,7 @@ class AtariEnvironment(object):
         self.state_buffer.popleft()
         self.state_buffer.append(obv)
 
-        return state_stack, reward, terminal, info
+        return state_stack, reward, done, info
 
 
 # =============================
@@ -224,7 +230,7 @@ def actor_learner_thread(thread_id, env, session, graph_ops, num_actions,
     Actor-learner thread implementing asynchronous one-step Q-learning, as specified
     in algorithm 1 here: http://arxiv.org/pdf/1602.01783v1.pdf.
     """
-    global TMAX, T
+    global TMAX, T, high_score, epoch, epoch_high_score, epoch_size
 
     # Unpack graph ops
     s = graph_ops["s"]
@@ -255,6 +261,8 @@ def actor_learner_thread(thread_id, env, session, graph_ops, num_actions,
 
     time.sleep(3*thread_id)
     t = 0
+    # Set up the plotting objects
+    
     while T < TMAX:
         # Get initial game observation
         s_t = env.get_initial_state()
@@ -322,11 +330,14 @@ def actor_learner_thread(thread_id, env, session, graph_ops, num_actions,
 
             # Save model progress
             if t % checkpoint_interval == 0:
-                saver.save(session, "qlearning.ckpt", global_step=t, write_meta_graph=False)
-
+                saver.save(session, "./model/train/DRQN.ckpt", global_step=t)
             # Print end of episode stats
             if terminal:
-                stats = [ep_reward, episode_ave_max_q/float(ep_t), epsilon]
+                if ep_reward > epoch_high_score: epoch_high_score = ep_reward
+                if t > epoch * epoch_size: 
+                    high_score.append(epoch_high_score)
+                    epoch_high_score = 0
+                stats = [ep_reward, episode_ave_max_q/float(ep_t), epsilon, max(high_score)]
                 for i in range(len(stats)):
                     session.run(assign_ops[i],
                                 {summary_placeholders[i]: float(stats[i])})
@@ -334,23 +345,25 @@ def actor_learner_thread(thread_id, env, session, graph_ops, num_actions,
                       "| Reward: %.2i" % int(ep_reward), " Qmax: %.4f" %
                       (episode_ave_max_q/float(ep_t)),
                       " Epsilon: %.5f" % epsilon, " Epsilon progress: %.6f" %
-                      (t/float(anneal_epsilon_timesteps)))
+                      (t/float(anneal_epsilon_timesteps)),
+                      "| High Score: ", max(high_score))
                 break
 
 
-def build_graph(num_actions, network_name):
+def build_graph(num_actions, args):
     # Create shared deep q network
     print ("building DQN")
-    if str(network_name) == "DRQN":
+    if str(args.network) == "DRQN":
         s, q_network = build_dqn(num_actions=num_actions,
                                  action_repeat=action_repeat)
     network_params = tf.trainable_variables()
     q_values = q_network
     print ("building shared network")
     # Create shared target network
-    if str(network_name) == "DRQN":
+    if str(args.network) == "DRQN":
         st, target_q_network = build_dqn(num_actions=num_actions,
                                          action_repeat=action_repeat)
+
     target_network_params = tf.trainable_variables()[len(network_params):]
     target_q_values = target_q_network
 
@@ -388,10 +401,12 @@ def build_summaries():
     scalar_summary("Qmax Value", episode_ave_max_q)
     logged_epsilon = tf.Variable(0.)
     scalar_summary("Epsilon", logged_epsilon)
+    high_score = tf.Variable(0.)
+    scalar_summary("High Score", high_score)
     # Threads shouldn't modify the main graph, so we use placeholders
     # to assign the value of every summary (instead of using assign method
     # in every thread, that would keep creating new ops in the graph)
-    summary_vars = [episode_reward, episode_ave_max_q, logged_epsilon]
+    summary_vars = [episode_reward, episode_ave_max_q, logged_epsilon, high_score]
     summary_placeholders = [tf.placeholder("float")
                             for i in range(len(summary_vars))]
     assign_ops = [summary_vars[i].assign(summary_placeholders[i])
@@ -415,19 +430,23 @@ def train(session, graph_ops, num_actions, saver, args):
     Train a model.
     """
 
-    if args.restore != "":
-        saver.restore(session, tf.train.latest_checkpoint('./'))
-    # Set up game environments (one per thread)
+        # Set up game environments (one per thread)
     envs = [gym.make(game) for i in range(n_threads)]
 
     summary_ops = build_summaries()
     summary_op = summary_ops[-1]
 
     # Initialize variables
-    session.run(tf.initialize_all_variables())
+    session.run(tf.global_variables_initializer())
+    if args.restore != "":
+        print ("restoring from {}".format(args.restore))
+        saver = tf.train.import_meta_graph(args.meta)
+        saver.restore(session, args.restore)
     writer = writer_summary(summary_dir + "/qlearning", session.graph)
     # Initialize target network weights
     session.run(graph_ops["reset_target_network_params"])
+
+
 
     # Start n_threads actor-learner training threads
     actor_learner_threads = \
@@ -458,11 +477,14 @@ def evaluation(session, graph_ops, saver, args):
     """
     Evaluate a model.
     """
-    saver.restore(session, args.load_params)
-    print("Restored model weights from ", args.load_params)
+    print ("attempting to restore from", args.restore)
+    saver = tf.train.import_meta_graph(args.meta)
+    saver.restore(session, args.restore)
+    print("Restored model weights from ", args.restore)
     monitor_env = gym.make(game)
-    monitor_env.monitor.start("qlearning/eval")
-
+    from gym import wrappers
+    monitor_env = wrappers.Monitor(monitor_env, "model/eval")
+    #monitor_env.monitor.start("model/eval")
     # Unpack graph ops
     s = graph_ops["s"]
     q_values = graph_ops["q_values"]
@@ -492,11 +514,11 @@ def main(_):
         args = collect_args()
         num_actions = get_num_actions()
         print ("building graph")
-        graph_ops = build_graph(num_actions, args.model)
+        graph_ops = build_graph(num_actions, args)
         saver = tf.train.Saver(max_to_keep=5)
-        if testing:
+        if args.mode == "test":
             evaluation(session, graph_ops, saver, args)
-        else:
+        elif args.mode == "train":
             print ("training")
             train(session, graph_ops, num_actions, saver, args)
 
