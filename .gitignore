@@ -87,3 +87,20 @@ ENV/
 
 # Rope project settings
 .ropeproject
+
+# tf stuff
+*.index
+checkpoint
+*.ckpt*
+*.ckpt
+*.cpkt.*
+*.data*
+*.meta*
+
+# data prep
+*.bin
+bazel*
+WORKSPACE
+BUILD
+events.*
+
