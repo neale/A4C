@@ -82,7 +82,7 @@ class Model(ModelDesc):
             self._initial_states = initial_states
             self._v_initial_states = [np.zeros(s.get_shape().as_list(), dtype=s.dtype.as_numpy_dtype()) for s in initial_states]
             self._output_states = output_states
-            self._sequence_lengths = sequence_lengths
+            self._seq_len = sequence_lengths
 
             for k, v in kwargs.items():
                 setattr(self, '_' + k, v)
@@ -100,10 +100,22 @@ class Model(ModelDesc):
     def __init__(self, **kwargs):
 
 	from collections import OrderedDict
-        self.lstm_states = OrderedDict()
-        self.batch_size = None
+        self._lstm_states = OrderedDict()
+        self.batch_size = BATCH_SIZE
         self.update_lstm_states = None
         self.reset_lstm_states = None
+        self._input_agent_idxs = None
+        self._input_states_list = []
+        self._input_actions = None
+        self._input_Rs = None
+        self._input_tds = None
+        self._input_is_over = None
+
+        self._trainable_weights = None
+        self._is_training = None
+
+        self._kernel_update_lstm_states = None
+        self._kernel_reset_lstm_states = None
 
     def _get_inputs(self):
         assert NUM_ACTIONS is not None
@@ -111,8 +123,8 @@ class Model(ModelDesc):
                 InputDesc(tf.int64, (None,), 'action'),
                 InputDesc(tf.float32, (None,), 'futurereward'),
 		InputDesc(tf.int32, (None,), 'sequencelength')]
-
-    def _get_NN_model(self, image):
+    
+    def _get_dqn(self, image):
         image = image / 255.0
         with argscope(Conv2D, nl=tf.nn.relu):
             l = Conv2D('conv0', image, out_channel=32, kernel_shape=5)
@@ -128,20 +140,20 @@ class Model(ModelDesc):
         
         return l 
 
-    def _create_rnn_from_cell(self, cell, rnn_input, name='default_rnn', sequence_length=512):
+    def _create_lstm_from_cell(self, cell, lstm_in, name='default_lstm', sequence_length=512):
         
-	assert (name not in self._rnn_states)
-        dtype = rnn_input.dtype
+	assert (name not in self._lstm_states)
+        dtype = lstm_in.dtype
         tc = get_current_tower_context()
         states_name_prefix = 'train' if tc.is_training else 'predictor'
         
 	if self.alstm_var_state is not None:
-            states_name_prefix = self._rnn_state_var_prefix
+            states_name_prefix = self.lstm_state_var
 
         rnn_state_size = cell.state_size
         
-	if isinstance(rnn_state_size, tf.contrib.rnn.LSTMStateTuple):
-            rnn_state_size = (rnn_state_size,)
+	if isinstance(lstm_state_size, rnn.LSTMStateTuple):
+            lstm_state_size = (lstm_state_size,)
 
         def get_state_variable(_name, state_size):
             
@@ -149,17 +161,17 @@ class Model(ModelDesc):
                 scope = tf.get_variable_scope()
                 assert (scope.reuse == False)
                 return tc.get_variable_on_tower(states_name_prefix + '/' + name + '/' + _name, 
-		           shape=(self._max_batch_size, state_size), 
+		           shape=(self._batch_size, state_size), 
 		           dtype=dtype, trainable=False, 
 		           initializer=tf.zeros_initializer())
 
-        initial_rnn_states = []
-        array_lstm_state_tuple = []
-        array_state = []
+        init_lstm_states = []
+        lstm_states = []
+        states = []
 
-        def get_rnn_state(state_size):
+        def get_lstm_state(state_size):
             
-	    if isinstance(state_size, tf.contrib.rnn.LSTMStateTuple):
+	    if isinstance(state_size, rnn.LSTMStateTuple):
                 
 		lstm_state_tuple_idx = len(array_lstm_state_tuple)
                 c = get_state_variable('LSTMStateTuple-{}/c'.format(lstm_state_tuple_idx), state_size.c)
@@ -167,85 +179,87 @@ class Model(ModelDesc):
                 
 		initial_rnn_states.append(c)
                 initial_rnn_states.append(h)
-                ret = rnn.LSTMStateTuple(tf.gather(c, self._input_agent_indexs),
-                                                     tf.gather(h, self._input_agent_indexs))
-                array_lstm_state_tuple.append(ret)
+                ret = rnn.LSTMStateTuple(tf.gather(c, self._input_agent_idxs),
+                                                     tf.gather(h, self._input_agent_idxs))
+                lstm_states.append(ret)
                 return ret
 
             elif isinstance(state_size, int):
                 
 		state_idx = len(array_state)
                 s = get_state_variable('LSTMState-{}'.format(state_idx), state_size)
-                initial_rnn_states.append(s)
-                ret = tf.gather(s, self._input_agent_indexs)
-                array_state.append(ret)
+                init_lstm_states.append(s)
+                ret = tf.gather(s, self._input_agent_idxs)
+                states.append(ret)
                 return ret
 
             elif isinstance(state_size, tuple):
                 
 		ret = []
                 for idx, _state_size in enumerate(state_size):
-                    ret.append(get_rnn_state(_state_size))
+                    ret.append(get_lstm_state(_state_size))
                 ret = tuple(ret)
                 return ret
 
             else: raise ValueError('unknown type {}'.format(type(state_size)))
 
-        _initial_rnn_states = get_rnn_state(cell.state_size)
+        _init_lstm_states = get_lstm_state(cell.state_size)
 
-        if sequence_length is None: sequence_length = self._input_seq_len
-        rnn_outputs, rnn_output_states = tf.nn.dynamic_rnn(cell,
-                                                           rnn_input,
-                                                           initial_state=_initial_rnn_states,
-                                                           sequence_length=sequence_length,
+        if seq_len is None: seq_len = self._input_seq_len
+        lstm_outputs, lstm_out_state = tf.nn.dynamic_rnn(cell,
+                                                           lstm_in,
+                                                           initial_state=_init_lstm_states,
+                                                           sequence_length=seq_len,
                                                            time_major=False,
                                                            scope=name,
                                                            )
-        rnn_output_states_array = []
+        lstm_out_states = []
         
-	def extract_rnn_output_states(output):
+	def get_lstm_out_states(output):
         
 	    if isinstance(output, rnn.LSTMStateTuple):
-                rnn_output_states_array.append(output.c)
-                rnn_output_states_array.append(output.h)
+                lstm_out_states.append(output.c).append(output.h)
+
             elif isinstance(output, tuple):
                 for idx, _output in enumerate(output):
-                    extract_rnn_output_states(_output)
+                    get_lstm_out_states(_output)
+
             elif isinstance(output, tf.Tensor):
-                rnn_output_states_array.append(output)
-            else: raise ValueError('unknow type {}'.format(type(output)))
+                lstm_out_states.append(output)
 
-        extract_rnn_output_states(rnn_output_states)
-        assert(len(rnn_output_states_array) == len(initial_rnn_states))
+            else: raise ValueError('bad type {}'.format(type(output)))
 
-        op_resets = []
+        get_lstm_out_states(lstm_out_states)
+        assert(len(lstm_out_states) == len(init_lstm_states))
+
+        kernel_resets = []
         if tc.is_training:
             need_reset_states = tf.reshape(tf.ones_like(self._input_is_over) - self._input_is_over, (-1, 1))
-            op_updates = [tf.scatter_update(initial_rnn_states[idx], self._input_agent_indexs, 
-			  rnn_output_states_array[idx] * tf.cast(need_reset_states, 
-			  rnn_output_states_array[idx].dtype)) \
-                          for idx in range(len(rnn_output_states_array))]
+            kernel_updates = [tf.scatter_update(init_lstm_states[idx], self._input_agent_idxs, 
+			  lstm_out_states[idx] * tf.cast(need_reset_states, 
+			  lstm_out_states[idx].dtype)) \
+                          for idx in range(len(lstm_out_states))]
 
         else:
             # in predict mode, the is_over is for last state
             batch_size = tf.shape(self._input_agent_idxs)[0]
-            op_updates = []
-            for idx in range(len(initial_rnn_states)):
-                shape_states = tf.shape(initial_rnn_states[idx])
-                op = tf.scatter_update(initial_rnn_states[idx], self._input_agent_indexs, 
+            kernel_updates = []
+            for idx in range(len(init_lstm_states)):
+                shape_states = tf.shape(init_lstm_states[idx])
+                kernel = tf.scatter_update(initial_rnn_states[idx], self._input_agent_idxs, 
 		      		       tf.zeros((batch_size,shape_states[1]), 
-				       dtype=initial_rnn_states[idx].dtype))
-                op_resets.append(op)
-                op = tf.scatter_update(initial_rnn_states[idx], self._input_agent_indexs, rnn_output_states_array[idx])
-                op_updates.append(op)
+				       dtype=init_lstm_states[idx].dtype))
+                kernel_resets.append(kernel)
+                kernel = tf.scatter_update(init_lstm_states[idx], self._input_agent_idxs, lstm_out_states[idx])
+                kernel_updates.append(kernel)
         
-	self._rnn_states[name] = self.RNNStateInfo(name, initial_rnn_states, rnn_output_states, 
-						   sequence_length, op_update_state=op_updates, 
-						   op_reset_state=op_resets)
+	self._lstm_states[name] = self.RNNStateInfo(name, init_lstm_states, lstm_out_states, 
+						   seq_len, kernel_update_state=kernel_updates, 
+						   kernel_reset_state=kernel_resets)
 
-        return rnn_outputs   
+        return lstm_outputs   
 
-    def _build_graph(self, inputs, batch_size=1, alstm_state_var=None):
+    def _build_graph(self, inputs, batch_size=BATCH_SIZE, alstm_state_var=None):
 
         self._is_training       = is_training = get_current_tower_context() and get_current_tower_context().is_training
         self._model_inputs      = inputs
@@ -258,14 +272,24 @@ class Model(ModelDesc):
         self._input_states_list = inputs[6:]
         self._batch_size        = batch_size
         self._alstm_state_var   = alstm_state_var
+        
+        if len(self._lstm_states) > 0:
+            kernel_update_states = []
+            for s in self._lstm_states.values():
+                kernel_update_states += s._kernel_update_state
+            self._kernel_update_lstm_states = tf.group(*kernel_update_states, name='update_lstm_states')
+            kernel_reset_states = []
+            for s in self._lstm_states.values():
+                kernel_reset_states += s._kernel_reset_state
+            if len(kernel_reset_states) > 0:
+                self._kernel_reset_lstm_states = tf.group(*kernel_reset_states, name='reset_lstm_states')
 
         state, action, futurereward = inputs
-        #policy, self.value = self._get_NN_prediction(state)
-        model         = self._get_NN_model(state)
+        model         = self._get_dqn(state)
         
         lstm_input    = tf.reshape(model, [1,-1,512])
         lstm_cell     = rnn.LSTMCell(512, use_peepholes=True)
-	lstm_outputs  = _create_rnn_from_cell(lstm_cell, lstm_input)
+	lstm_outputs  = _create_lstm_from_cell(lstm_cell, lstm_input)
 
         policy        = FullyConnected('fc-pi', lstm_outputs, out_dim=NUM_ACTIONS, nl=tf.identity)
         self.value    = FullyConnected('fc-v', lstm_outputs, 1, nl=tf.identity)
