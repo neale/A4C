@@ -97,6 +97,8 @@ checkpoint
 *.data*
 *.meta*
 
+train-log/
+sim-*
 # data prep
 *.bin
 bazel*
