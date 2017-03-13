@@ -9,3 +9,14 @@ We propose that there is much information contained within the state held by the
 
 # Benefits
 In addition to adding further decriminatory power to the DRQN, we believe that this method will speed up convergence. The network should spend less time searching randomly through the state space if it only cares about optimizing a fraction of the parameters.  
+
+# A3C
+Good
+
+# Recurrent A3C
+Better
+
+# A4C
+Best
+
+
