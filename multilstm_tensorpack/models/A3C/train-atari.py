@@ -36,7 +36,7 @@ GAMMA = 0.99
 CHANNEL = FRAME_HISTORY * 3
 IMAGE_SHAPE3 = IMAGE_SIZE + (CHANNEL,)
 
-LOCAL_TIME_MAX = 5
+LOCAL_TIME_MAX = 20
 STEPS_PER_EPOCH = 6000
 EVAL_EPISODE = 50
 BATCH_SIZE = 128
@@ -84,6 +84,7 @@ class Model(ModelDesc):
             self._v_initial_state = [np.zeros(s.get_shape().as_list(), dtype=s.dtype.as_numpy_dtype()) for s in initial_state]
             self._output_state = output_state
             self._seq_len = sequence_length
+            self.lstm_created = False
 
             for k, v in kwargs.items():
                 setattr(self, '_' + k, v)
@@ -95,154 +96,42 @@ class Model(ModelDesc):
             self._v_initial_state = newstate
 
     def __init__(self, **kwargs):
-        self.lstm_created       = True
-        self.batch_size         = 1
-        self.update_lstm_state  = None
-        self.reset_lstm_state   = None
-        self._input_states_list = []
-        self._input_action      = None
-        self._input_reward      = None
-        self._input_td          = None
-        self._input_is_over     = None
 
-        self._trainable_weights = None
-        self._is_training       = None
+        pass
 
-        self._kernel_update_lstm_state = None
-        self._kernel_reset_lstm_state = None
-
-    def _create_lstm_from_cell(self, cell, lstm_in, name='default_lstm', seq_len=None):
-        dtype = lstm_in.dtype
-        tc = get_current_tower_context()
-        states_name_prefix = 'train' if tc.is_training else 'predictor'
-        
-	if self._lstm_state_var is not None:
-            state_name_prefix = self._lstm_state_var
-
-        lstm_state_size = cell.state_size
-        
-	if isinstance(lstm_state_size, rnn.LSTMStateTuple):
-            lstm_state_size = (lstm_state_size,)
-
-        def get_state_variable(_name, state_size):
-            
-	    with tf.variable_scope(tf.get_variable_scope(), reuse=False):
-                scope = tf.get_variable_scope()
-                assert (scope.reuse == False)
-                return tc.get_variable_on_tower(states_name_prefix + '/' + name + '/' + _name, 
-		           shape=(self._batch_size, state_size), 
-		           dtype=dtype, trainable=False, 
-		           initializer=tf.zeros_initializer())
-
-        init_lstm_state = []
-        lstm_state = []
-        state = []
-
-        def get_lstm_state(state_size):
-            
-	    if isinstance(state_size, rnn.LSTMStateTuple):
-                
-		lstm_state_tuple_idx = len(lstm_state)
-                c = get_state_variable('LSTMStateTuple-{}/c'.format(lstm_state_tuple_idx), state_size.c)
-                h = get_state_variable('LSTMStateTuple-{}/h'.format(lstm_state_tuple_idx), state_size.h)
-		init_lstm_state.append(c)
-                init_lstm_state.append(h)
-                ret = rnn.LSTMStateTuple(c,h)
-                lstm_state.append(ret)
-                return ret
-
-            elif isinstance(state_size, int):
-                
-		state_idx = len(state)
-                s = get_state_variable('LSTMState-{}'.format(state_idx), state_size)
-                init_lstm_state.append(s)
-                ret = s
-                state.append(ret)
-                return ret
-
-            elif isinstance(state_size, tuple):
-                
-		ret = []
-                for idx, _state_size in enumerate(state_size):
-                    ret.append(get_lstm_state(_state_size))
-                ret = tuple(ret)
-                return ret
-
-            else: raise ValueError('unknown type {}'.format(type(state_size)))
-
-        _init_lstm_state = get_lstm_state(cell.state_size)
-        if seq_len is None: seq_len = self._input_seq_len
-        lstm_output, lstm_out_state = tf.nn.dynamic_rnn(cell,
-                                                         lstm_in,
-                                                         initial_state=_init_lstm_state,
-                                                         sequence_length=seq_len,
-                                                         time_major=False,
-                                                         scope=name,
-                                                         )
-        print lstm_in
-        lstm_out_states = []
-	def get_lstm_out_state(output):
-        
-	    if isinstance(output, rnn.LSTMStateTuple):
-                lstm_out_states.append(output.c)
-		lstm_out_states.append(output.h)
-
-            elif isinstance(output, tuple):
-                for idx, _output in enumerate(output):
-                    get_lstm_out_state(_output)
-
-            elif isinstance(output, tf.Tensor):
-                lstm_out_states.append(output)
-
-            else: raise ValueError('bad type {}'.format(type(output)))
-
-        get_lstm_out_state(lstm_out_state)
-        assert(len(lstm_out_states) == len(init_lstm_state))
-
-        kernel_resets = []
-        if tc.is_training:
-            need_reset_state = tf.reshape(tf.ones_like(self._isOver) - self._isOver, (-1, 1))
-            kernel_updates = [ 
-                               lstm_out_state[idx] * tf.cast(need_reset_state, lstm_out_states[idx].dtype) \
-                               for idx in range(len(lstm_out_states))
-                             ]
-
-        else:
-            # in predict mode, the is_over is for last state
-            batch_size = 1
-            kernel_updates = []
-            for idx in range(len(init_lstm_state)):
-                shape_state = tf.shape(init_lstm_state[idx])
-                kernel = tf.zeros((batch_size,shape_state[1]), dtype=init_lstm_state[idx].dtype)
-                kernel_resets.append(kernel)
-                kernel = lstm_out_states[idx]
-                kernel_updates.append(kernel)
-        
-	self._lstm_state = self.LSTMState(name, init_lstm_state, lstm_out_state, 
-						   seq_len, kernel_update_state=kernel_updates, 
-						   kernel_reset_state=kernel_resets)
-
-        return lstm_output  
-    
-    def get_weight_vars(self):
-        return self._trainable_weights
-
-    def set_weights(self, sess, weights):
-        sess.run(self._op_sync_weights, feed_dict=dict(zip(self._ph_sync_weights, weights)))
-
-    def reset_rnn_states(self, sess):
-        if self._op_reset_rnn_states is not None:
-            sess.run(self._op_reset_rnn_states, feed_dict = {self._input_agent_indexs: np.arange(self._max_batch_size)})
-        else:
-            _logger.warn("no reset rnn states op") 
-               
     def _get_inputs(self):
         _state  = InputDesc(tf.float32, (None,)+IMAGE_SHAPE3, 'state')
 	_action = InputDesc(tf.int64, (None,), 'action')
 	_reward = InputDesc(tf.float32, (None,), 'futurereward')
         _isOver = InputDesc(tf.int32, (None,), 'isOver')
-        return [_state, _action, _reward, _isOver]
+        return [_state, _action, _reward]
     
+    def _get_state_variable(self, _name, state_size):
+          
+        tc = get_current_tower_context()
+	states_name_prefix = 'train' if tc.is_training else 'predictor'
+	with tf.variable_scope(tf.get_variable_scope(), reuse=False):
+            scope = tf.get_variable_scope()
+            assert (scope.reuse == False)
+            return tc.get_variable_on_tower(states_name_prefix + '/' + 'lstm0' + '/' + _name, 
+	        shape=(1, state_size), 
+	        dtype=tf.float32, trainable=False, 
+	        initializer=tf.zeros_initializer())
+
+    def _get_lstm_state(self, state_size, init_lstm_state, lstm_state):
+  
+	lstm_num = len(lstm_state)
+	c = self._get_state_variable('LSTMStateTuple-{}/c'.format(lstm_num), state_size.c)
+	h = self._get_state_variable('LSTMStateTuple-{}/h'.format(lstm_num), state_size.h)
+        print dir(c._AsTensor())
+        print c
+        c = tf.Print(c, [c.value()], "C:")
+	init_lstm_state.append(c)
+	init_lstm_state.append(h)
+	ret = rnn.LSTMStateTuple(c,h)
+	lstm_state.append(ret)
+	return ret, init_lstm_state, lstm_state
+
     def _get_dqn(self, image):
         image = image / 255.0
         with argscope(Conv2D, nl=tf.nn.relu):
@@ -254,48 +143,49 @@ class Model(ModelDesc):
             l = MaxPooling('pool2', l, 2)
             l = Conv2D('conv3', l, out_channel=64, kernel_shape=3)
 
-        l = FullyConnected('fc0', l, 512, nl=tf.identity)
+        l = FullyConnected('fc0', tf.contrib.slim.flatten(l), 512, nl=tf.identity)
         l = PReLU('prelu', l)
         
-        lstm_input    = tf.reshape(l, [1,-1,512])
-        lstm_cell     = rnn.LSTMCell(512, use_peepholes=True)
-        lstm_outputs  = self._create_lstm_from_cell(lstm_cell, lstm_input, "lstm0")
-        lstm_outputs  = tf.reshape(lstm_outputs, [-1, 512])
-        policy        = FullyConnected('fc-pi', lstm_outputs, out_dim=NUM_ACTIONS, nl=tf.identity)
-        value         = FullyConnected('fc-v', lstm_outputs, 1, nl=tf.identity)
+        lstm_input = tf.expand_dims(l, [0])
+        lstm_cell      = rnn.BasicLSTMCell(512, state_is_tuple=True)
+        #if not self.lstm_created:
         
+        init_lstm_state, lstm_state, state, lstm_out_states = [], [], [], []
+        _init, init_lstm_state, lstm_state = self._get_lstm_state(lstm_cell.state_size, init_lstm_state, lstm_state)
+        sequence_length = [1]
+        lstm_outputs, lstm_out_state = tf.nn.dynamic_rnn(lstm_cell, 
+                                                     lstm_input, 
+                                                     initial_state=_init,
+                                                     sequence_length=sequence_length,
+                                                     time_major=False)
+
+        lstm_out_states.append(lstm_out_state.c)
+        lstm_out_states.append(lstm_out_state.h)
+        self._LSTMState  = self.LSTMState('lstm0', init_lstm_state, lstm_out_state, sequence_length)
+        self.lstm_created = True
+ 
+        # DEBUG 
+        lstm_outputs = tf.ones_like(lstm_outputs)
+        lstm_outputs = tf.Print(lstm_outputs, [lstm_outputs], "LSTM OUTPUTS")
+        lstm_outputs = tf.Print(lstm_outputs, [tf.shape(lstm_outputs)], "LSTM STATE")
+        
+        tc = get_current_tower_context()
+#        if tc.is_training:
+
+        lstm_outputs   = tf.reshape(lstm_outputs, [-1, 512])
+        policy         = FullyConnected('fc-pi', lstm_outputs, out_dim=NUM_ACTIONS, nl=tf.identity)
+        value          = FullyConnected('fc-v', lstm_outputs, 1, nl=tf.identity)
+        
+
         return policy, value
 
-    def _build_graph(self, inputs, batch_size=1, lstm_state_var=None):
+
+    def _build_graph(self, inputs):
+
         if inputs is None: inputs = self.get_reused_placehldrs()
-        self.lstm_created       = False
-        self._is_training       = is_training = get_current_tower_context() and get_current_tower_context().is_training
-        self._model_inputs      = inputs
-        self._input_state       = inputs[0]
-        self._input_action      = inputs[1]
-        self._input_reward      = inputs[2]
-        self._isOver            = inputs[3]
-        self._batch_size        = batch_size
-        self._lstm_state_var    = lstm_state_var
-        self._input_seq_len     = [84*84]
+        is_training   = get_current_tower_context().is_training
 
-	if self._trainable_weights is None:
-
-            self._trainable_weights = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
-            self._ph_sync_weights = [tf.placeholder(v.dtype) for v in self._trainable_weights]
-            self._op_sync_weights = tf.group(*[v.assign(ph) for v, ph in zip(self._trainable_weights, self._ph_sync_weights)]) 
-
-        if self.lstm_created:
-
-            kernel_update_states = self._lstm_state._kernel_update_state
-            self._kernel_update_lstm_states = tf.group(*kernel_update_states, name='update_lstm_states')
-            kernel_reset_states = self._lstm_state._kernel_reset_state
-            self._kernel_reset_lstm_states = tf.group(*kernel_reset_states, name='reset_lstm_states')
-
-        for i, item in enumerate(inputs):
-            print i, item
-
-        action, state, futurereward = self._input_action, self._input_state, self._input_reward
+        state, action,  futurereward = inputs
 	
         policy, self.value = self._get_dqn(state) 
 
@@ -306,7 +196,6 @@ class Model(ModelDesc):
                                		initializer=tf.constant_initializer(1), trainable=False)
 
         logitsT       = tf.nn.softmax(policy * expf, name='logitsT')
-        is_training   = get_current_tower_context().is_training
         
         if not is_training:
             return
@@ -364,11 +253,13 @@ class MySimulatorMaster(SimulatorMaster, Callback):
             client = self.clients[ident]
             client.memory.append(TransitionExperience(state, action, None, value=value))
             self.send_queue.put([ident, dumps(action)])
+        #self.M._LSTMState.update(
         self.async_predictor.put_task([state], cb)
 
     def _on_episode_over(self, ident):
         self._parse_memory(0, ident, True)
-        
+       	self.M._LSTMState.reset_state() 
+
     def _on_datapoint(self, ident):
         client = self.clients[ident]
         if len(client.memory) == LOCAL_TIME_MAX + 1:
@@ -397,7 +288,7 @@ class MySimulatorMaster(SimulatorMaster, Callback):
 def get_config():
     logger.auto_set_dir()
     M = Model()
-
+    
     name_base = str(uuid.uuid1())[:6]
     PIPE_DIR = os.environ.get('TENSORPACK_PIPEDIR', '.').rstrip('/')
     namec2s = 'ipc://{}/sim-c2s-{}'.format(PIPE_DIR, name_base)
