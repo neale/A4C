@@ -208,6 +208,9 @@ class AsyncMultiGPUTrainer(MultiGPUTrainer,
         # itertools.count is atomic w.r.t. python threads
         self.async_step_counter = itertools.count()
         self.training_threads = []
+        print grad_list
+        import sys
+        sys.exit(0)
         for k in range(1, self.config.nr_tower):
             train_op = self.config.optimizer.apply_gradients(grad_list[k])
 

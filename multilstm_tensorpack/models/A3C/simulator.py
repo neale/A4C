@@ -246,6 +246,8 @@ class SimulatorProcessSharedWeight(SimulatorProcessDF):
 
     def _params_to_update(self):
         # can be overwritten to update more params
+        print tf.trainable_variables()
+        sys.exit(0)
         return tf.trainable_variables()
 
 
@@ -261,6 +263,8 @@ class WeightSync(Callback):
 
     def _params_to_update(self):
         # can be overwritten to update more params
+        print tf.trainable_variables()
+        exit(0)
         return tf.trainable_variables()
 
     def _before_train(self):
