@@ -22,7 +22,7 @@ merge_all_summaries = tf.summary.merge_all
 histogram_summary = tf.summary.histogram
 scalar_summary = tf.summary.scalar
 
-game = 'MsPacman-v0'
+game = 'SpaceInvaders-v0'
 # Learning threads
 n_threads = 4
 
@@ -73,7 +73,7 @@ def collect_args():
     parser.add_argument('--restore', '-r', help="Path to saved model checkpoint", 
                         default="")
     parser.add_argument('--network', '-n', help="Model to run for pacman: DQN, DRQN, DRAQN",
-                        default='DQRN')
+                        default='A3CLSTM')
     parser.add_argument('--learning_rate', '-lr', help="default starting learning rate",
                         default=0.1)
     parser.add_argument('--epsilon', '-e', help="default starting epsilon (greedy aggression)",
@@ -101,9 +101,9 @@ def build_dqn(num_actions, action_repeat):
     #fc1_game   = tflearn.fully_connected(conv2, 512, activation='relu')
     #q_values   = tflearn.fully_connected(fc1_game, num_actions)
 
-    fc1_hidden = tflearn.fully_connected(conv2, 512, activation='relu')
-    lstm_in    = tf.reshape(fc1_hidden, [-1, 1, 512])
-    lstm_1     = tflearn.lstm(lstm_in, 512, dropout=0.5)
+    fc1_hidden = tflearn.fully_connected(conv2, 256, activation='relu')
+    lstm_in    = tf.reshape(fc1_hidden, [-1, 1, 256])
+    lstm_1     = tflearn.lstm(lstm_in, 256, dropout=0.5)
     q_values   = tflearn.fully_connected(lstm_1, num_actions, activation='softmax')
     return inputs, q_values
 
@@ -114,36 +114,21 @@ def build_a3c(num_actions, action_repeat):
     inputs = tf.placeholder(tf.float32, [None, action_repeat, 84, 84])
     # input shape same as the DRQN 
     input  = tf.transpose(inputs, [0, 2, 3, 1])
-    conv1  = tflearn.conv_2d(input, 32, 8, strides=4, activation='relu', scope='conv1', padding='valid')
-    conv2  = tflearn.conv_2d(conv1, 64, 4, strides=2, activation='relu', scope='conv2', padding='valid')
+    net  = tflearn.conv_2d(input, 32, 8, strides=4, activation='relu', padding='valid')
+    net  = tflearn.conv_2d(net, 64, 4, strides=2, activation='relu', padding='valid')
     # smaller FC layer to account for more versitle LSTM cell structure
-    fc1    = tflearn.fully_connected(conv2, 512, activation='relu', scope='dense3')
+    net    = tflearn.fully_connected(net, 256, activation='relu')
     # reshape larger fc output to lstm shape (1, batch_size, fc_size)
-    fc_out = tf.reshape(l_hid3, [1, -1, 512])
+    net = tf.reshape(net, [-1, 1, 256])
     # tflearn doesn't support dynamic networks so we have to make the lstm use tf.nn.dynamic_rnn
     # extending tflearn with drop in tensorflow is as easy as torch
-    lstm1 = tflearn.BasicLSTMCell(512)
-    # BasicLSTMCell lists state size as tuple so we need to pass tuple into dynamic_rnn
-    # this kind of boilerplate is what we want to get away from with TFlearn. Yet here we are
-    lstm_size = tuple([[1, x] for x in lstm1.state_size])
-    # extend to dynamic RNN cell with tf.python.ops.rnn_cell.LSTMStateTuple
-    # we will first create the state size with stock TF, so that dynamic rnn_cell can handle it
-    lstm_state = _rnn.LSTMStateTuple(tf.placeholder(tf.float32, shape=lstm_size[0], name='lstm_state1'),
-                                                  tf.placeholder(tf.float32, shape=lstm_size[1], name='lstm_state2'))
-    # dynamically pass through the sequence
-    seq = tf.reshape(tf.shape(fc3)[0], [1])
-    # dynamic size means the network doesnt spend time trying to always pass the same size input to the LSTM
-    # freeing it up to learn whatever shape it wants
-    lstm2, lstm_state_new = tf.nn.dynamic_rnn(lstm1, fc_out,
-                                                initial_state=lstm_state, sequence_length=seq,
-                                                time_major=False, scope='lstm2')
+    net = tflearn.lstm(net, 256, dropout=0.5, dynamic=True)
 
     # reshape lstm back to (batch_size, 256)
-    lstm2_out = tf.reshape(lstm2, [-1, 512])
-    actor_out = tflearn.fully_connected(lstm2_out, num_actions, activation='softmax', scope='actor')
-    critic_out = tflearn.fully_connected(lstm2_out, 1, activation='linear', scope='critic')
+    net = tf.reshape(net, [-1, 256])
+    q_values = tflearn.fully_connected(net, num_actions, activation='softmax')
 
-    return actor, critic, lstm_state, lstm_state_new
+    return inputs, q_values
 
 # =============================
 #   ATARI Environment Wrapper
@@ -353,15 +338,15 @@ def actor_learner_thread(thread_id, env, session, graph_ops, num_actions,
 def build_graph(num_actions, args):
     # Create shared deep q network
     print ("building DQN")
-    if str(args.network) == "DRQN":
-        s, q_network = build_dqn(num_actions=num_actions,
+    if str(args.network) == "A3CLSTM":
+        s, q_network = build_a3c(num_actions=num_actions,
                                  action_repeat=action_repeat)
     network_params = tf.trainable_variables()
     q_values = q_network
     print ("building shared network")
     # Create shared target network
-    if str(args.network) == "DRQN":
-        st, target_q_network = build_dqn(num_actions=num_actions,
+    if str(args.network) == "A3CLSTM":
+        st, target_q_network = build_a3c(num_actions=num_actions,
                                          action_repeat=action_repeat)
 
     target_network_params = tf.trainable_variables()[len(network_params):]
