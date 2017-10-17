@@ -1,7 +1,7 @@
 import math
 import os
 import sys
-
+from scipy.misc import imshow
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -13,14 +13,16 @@ import time
 from collections import deque
 
 
-def test(rank, args, shared_model):
-    torch.manual_seed(args.seed + rank)
+def test(rank, shared_model):
 
-    env = create_atari_env(args.env_name)
-    env.seed(args.seed + rank)
+    game = "Seaquest-v0"
+    torch.manual_seed(1 + rank)
+
+    env = create_atari_env(game)
+    env.seed(1 + rank)
 
     model = ActorCritic(env.observation_space.shape[0], env.action_space)
-
+    #model = torch.load('/home/neale/repos/pyA3C/models/trained/Seaquest-v0ckpt.pymodel')
     model.eval()
 
     state = env.reset()
@@ -44,12 +46,18 @@ def test(rank, args, shared_model):
             cx = Variable(cx.data, volatile=True)
             hx = Variable(hx.data, volatile=True)
 
-        value, logit, (hx, cx) = model((Variable(state.unsqueeze(0), volatile=True), (hx, cx)))
+        value, logit, (hx, cx) = model(
+            (Variable(state.unsqueeze(0), volatile=True), (hx, cx)))
         prob = F.softmax(logit)
         action = prob.max(1)[1].data.numpy()
 
+
         state, reward, done, _ = env.step(action[0, 0])
-        done = done or episode_length >= args.max_episode_length
+
+        print state.shape
+        imshow(state[0])
+
+        done = done or episode_length >= 1000000
         reward_sum += reward
 
         # a quick hack to prevent the agent from stucking
@@ -58,11 +66,13 @@ def test(rank, args, shared_model):
             done = True
 
         if done:
-            print("Time {}, episode reward {}, episode length {}".format(
+            print("Time {}, score {}, episode length {}".format(
                 time.strftime("%Hh %Mm %Ss",
                               time.gmtime(time.time() - start_time)),
                 reward_sum, episode_length))
             reward_sum = 0
+            torch.save(model, './models/trained/'+game+'_ckpt.pymodel')
+
             episode_length = 0
             actions.clear()
             state = env.reset()
