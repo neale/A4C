@@ -83,7 +83,7 @@ class Model(ModelDesc):
         self.lstm_created = False
         self._LSTMState   = None
         self.freeze       = False
-    
+
     def reset_rnn(self):
         pass
 
@@ -93,27 +93,27 @@ class Model(ModelDesc):
 	_reward = InputDesc(tf.float32, (None,), 'futurereward')
         _isOver = InputDesc(tf.int32, (None,), 'isOver')
         return [_state, _action, _reward]
-    
+
     def _get_state_variable(self, _name, state_size):
-          
+
         tc = get_current_tower_context()
 	states_name_prefix = 'train' if tc.is_training else 'predictor'
 	with tf.variable_scope(tf.get_variable_scope(), reuse=False):
             scope = tf.get_variable_scope()
             assert (scope.reuse == False)
             label = states_name_prefix+'/'+'lstm0'+'/'+_name
-            res = tc.get_variable_on_tower(label, 
-	        shape=(1, state_size), 
-	        dtype=self.lstm_input.dtype, trainable=True, 
+            res = tc.get_variable_on_tower(label,
+	        shape=(1, state_size),
+	        dtype=self.lstm_input.dtype, trainable=True,
 	        initializer=tf.zeros_initializer())
             #res = tf.Print(res, [res], label)
             return res
 
     def _lstm_trainable(self, lstm_input):
-  
+
         sequence_length = [1]
         with tf.variable_scope("lstm0") as scope:
- 
+
             #place LSTM within a retrievable scope
             lstm_cell = rnn.BasicLSTMCell(256, state_is_tuple=True)
             c_init = tf.zeros([1, lstm_cell.state_size.c], tf.float32)
@@ -126,14 +126,14 @@ class Model(ModelDesc):
             lstm_init_shape = [c_init, h_init]
             # state_in = rnn.LSTMStateTuple(c_init, h_init)
             lstm_outputs, lstm_out_state = tf.nn.dynamic_rnn(lstm_cell, lstm_input, sequence_length,
-                                                             state_in, 
+                                                             state_in,
                                                              dtype=tf.float32)
             scope.reuse_variables()
 
         return lstm_outputs
- 
+
     def _lstm_frozen(self, lstm_input):
-  
+
 	print "this?"
         sequence_length = [1]
         with tf.variable_scope("lstm0", reuse=True) as scope:
@@ -152,11 +152,11 @@ class Model(ModelDesc):
             state_in = rnn.LSTMStateTuple(c_init, h_init)
 
             lstm_outputs, lstm_out_state = tf.nn.dynamic_rnn(lstm_cell, lstm_input, sequence_length,
-                                                             state_in, 
+                                                             state_in,
                                                              dtype=tf.float32)
             scope.reuse_variables()
 
-            
+
             for item in tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='lstm_frozen'):
                 if item.name[-8:] == 'biases:0':
                     item.assign(b)
@@ -164,7 +164,7 @@ class Model(ModelDesc):
                     item.assign(w)
 
         return lstm_outputs
-    
+
     def _get_dqn(self, image):
         image = image / 255.0
         with argscope(Conv2D, nl=tf.nn.relu):
@@ -178,7 +178,7 @@ class Model(ModelDesc):
 
         l = FullyConnected('fc0', tf.contrib.slim.flatten(l), 256, nl=tf.identity)
         l = PReLU('prelu', l)
-        
+
         lstm_input      = l
         self.lstm_input = lstm_input
         lstm_input = tf.expand_dims(l, [0])
@@ -190,7 +190,7 @@ class Model(ModelDesc):
         sequence_length = [1]
 
         with tf.variable_scope("lstm0") as scope:
- 
+
             #place LSTM within a retrievable scope
             lstm_cell = rnn.BasicLSTMCell(256, state_is_tuple=True)
             c_init = tf.zeros([1, lstm_cell.state_size.c], tf.float32)
@@ -203,7 +203,7 @@ class Model(ModelDesc):
             lstm_init_shape = [c_init, h_init]
             # state_in = rnn.LSTMStateTuple(c_init, h_init)
             lstm_out, lstm_out_state = tf.nn.dynamic_rnn(lstm_cell, lstm_input, sequence_length,
-                                                             state_in, 
+                                                             state_in,
                                                              dtype=tf.float32)
             scope.reuse_variables()
 
@@ -218,7 +218,7 @@ class Model(ModelDesc):
         lstm_outputs   = tf.reshape(lstm_out, [-1, 256])
         policy         = FullyConnected('fc-pi', lstm_outputs, out_dim=NUM_ACTIONS, nl=tf.identity)
         value          = FullyConnected('fc-v', lstm_outputs, 1, nl=tf.identity)
-        
+
         return policy, value
 
 
@@ -228,8 +228,8 @@ class Model(ModelDesc):
         is_training   = get_current_tower_context().is_training
 
         state, action,  futurereward = inputs
-	
-        policy, self.value = self._get_dqn(state) 
+
+        policy, self.value = self._get_dqn(state)
 
         self.value    = tf.squeeze(self.value, [1], name='pred_value')  # (B,)
         self.logits   = tf.nn.softmax(policy, name='logits')
@@ -238,10 +238,10 @@ class Model(ModelDesc):
                                		initializer=tf.constant_initializer(1), trainable=False)
 
         logitsT       = tf.nn.softmax(policy * expf, name='logitsT')
-        
+
         if not is_training:
             return
-        
+
         log_probs     = tf.log(self.logits + 1e-6)
 
         log_pi_a_s    = tf.reduce_sum(log_probs * tf.one_hot(action, NUM_ACTIONS), 1)
@@ -298,7 +298,7 @@ class MySimulatorMaster(SimulatorMaster, Callback):
 
     def _on_episode_over(self, ident):
         self._parse_memory(0, ident, True)
-       	self.M.reset_rnn() 
+       	self.M.reset_rnn()
 
     def _on_datapoint(self, ident):
         client = self.clients[ident]
@@ -331,7 +331,7 @@ class MySimulatorMaster(SimulatorMaster, Callback):
 def get_config():
     logger.auto_set_dir()
     M = Model()
-    
+
     name_base = str(uuid.uuid1())[:6]
     PIPE_DIR = os.environ.get('TENSORPACK_PIPEDIR', '.').rstrip('/')
     namec2s = 'ipc://{}/sim-c2s-{}'.format(PIPE_DIR, name_base)
